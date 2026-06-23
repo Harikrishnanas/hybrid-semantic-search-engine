@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# Environment Variables
+.env
+
+# Uploaded PDFs
+uploads/
+
+# FAISS Indexes
+vector_store/
+
+# OS Files
+.DS_Store
+Thumbs.db
