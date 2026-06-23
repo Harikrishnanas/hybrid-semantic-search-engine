@@ -664,11 +664,13 @@ if result:
     coverage    = result.get("document_coverage", 0.0)
     confidence  = result.get("semantic_confidence", 0.0)
     confidence_label = result.get("confidence_label", "Very Low")
-    evidence_strength = result.get("evidence_strength", "Very Weak")
+    evidence_strength = result.get("evidence_strength", "No Evidence")
     evidence_found = result.get("evidence_found", False)
-    questions   = result.get("related_questions", [])
     analytics   = result.get("analytics")
     results     = result.get("results", [])
+    best_bm25   = result.get("best_bm25_score", 0.0)
+    best_faiss  = result.get("best_faiss_score", 0.0)
+    best_rerank = result.get("best_rerank_score", 0.0)
 
     # ── Query classification ──
     qtype_map = {
@@ -680,10 +682,9 @@ if result:
 
     # ── Source badge ──
     badge_map = {
-        "doc":      ("badge-doc",     source_label),
-        "ai":       ("badge-ai",      source_label),
-        "hybrid":   ("badge-hybrid",  source_label),
-        "fallback": ("badge-fallback", source_label),
+        "doc":    ("badge-doc",    source_label),
+        "ai":     ("badge-ai",     source_label),
+        "hybrid": ("badge-hybrid", source_label),
     }
     badge_cls, badge_text = badge_map.get(source_type, ("badge-ai", source_label))
 
@@ -710,35 +711,72 @@ if result:
         if st.session_state.active_document:
             st.markdown('<div class="search-card">', unsafe_allow_html=True)
             st.markdown('<div class="section-header">📊 Semantic Analysis</div>', unsafe_allow_html=True)
-            
-            # Coverage bar logic
+
+            # Always derive display from evidence_found flag for consistency
             if evidence_found:
-                render_metric_bar("Document Coverage", coverage)
+                render_metric_bar("Document Coverage", coverage, custom_strength=evidence_strength)
+                render_metric_bar("Semantic Confidence", confidence, custom_strength=confidence_label)
             else:
                 render_metric_bar("Document Coverage", 0.0, custom_strength="No Evidence")
-                
-            render_metric_bar("Semantic Confidence", confidence, custom_strength=confidence_label)
-            
+                render_metric_bar("Semantic Confidence", min(confidence, 10.0), custom_strength="Very Low")
+
+            # Evidence Strength row
+            display_strength = evidence_strength if evidence_found else "No Evidence"
+            strength_color = {
+                "Very Strong": "#4ade80",
+                "Strong":      "#86efac",
+                "Moderate":    "#fcd34d",
+                "Weak":        "#fb923c",
+                "Very Weak":   "#f87171",
+                "No Evidence": "#ef4444",
+            }.get(display_strength, "#8892a4")
             st.markdown(f"""
             <div class="metric-label" style="margin-top: 0.5rem;">
               <span>Evidence Strength</span>
-              <span>{evidence_strength}</span>
+              <span style="color:{strength_color};font-weight:700;">{display_strength}</span>
             </div>
             """, unsafe_allow_html=True)
-            
-            st.markdown('</div>', unsafe_allow_html=True)
 
-        # Related Questions
-        if questions:
-            st.markdown('<div class="search-card">', unsafe_allow_html=True)
-            st.markdown('<div class="section-header">❓ Related Questions</div>', unsafe_allow_html=True)
-            for q in questions:
-                st.markdown(f'<div class="rq-item">→ {q}</div>', unsafe_allow_html=True)
+            if not evidence_found and st.session_state.active_document:
+                st.markdown("""
+                <div style="margin-top:0.8rem;padding:0.6rem 0.9rem;
+                     background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);
+                     border-radius:8px;font-size:0.82rem;color:#fca5a5;">
+                  ⚠️ No supporting evidence found in uploaded document. Answer generated from AI knowledge.
+                </div>
+                """, unsafe_allow_html=True)
+
             st.markdown('</div>', unsafe_allow_html=True)
 
     with col_right:
+        # Retrieval Transparency Panel
+        if st.session_state.active_document:
+            st.markdown('<div class="search-card">', unsafe_allow_html=True)
+            st.markdown('<div class="section-header">🔍 Retrieval Transparency</div>', unsafe_allow_html=True)
+            st.markdown(f"""
+            <div style="font-size:0.85rem;line-height:2;">
+              <div class="metric-label">
+                <span style="color:#8892a4;">Best BM25 Score</span>
+                <span style="color:#f0f4ff;font-weight:700;font-family:monospace;">{best_bm25:.3f}</span>
+              </div>
+              <div class="metric-label">
+                <span style="color:#8892a4;">Best Dense Similarity</span>
+                <span style="color:#f0f4ff;font-weight:700;font-family:monospace;">{best_faiss:.4f}</span>
+              </div>
+              <div class="metric-label">
+                <span style="color:#8892a4;">Best Rerank Score</span>
+                <span style="color:#f0f4ff;font-weight:700;font-family:monospace;">{best_rerank:.4f}</span>
+              </div>
+              <div class="metric-label" style="margin-top:0.4rem;padding-top:0.4rem;border-top:1px solid #2a2f42;">
+                <span style="color:#8892a4;">Analytics Source</span>
+                <span style="color:#93c5fd;font-size:0.78rem;">CrossEncoder Reranker</span>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+
         # Retrieval Analytics
-        if analytics:
+        if analytics and st.session_state.active_document:
             st.markdown('<div class="search-card">', unsafe_allow_html=True)
             st.markdown('<div class="section-header">⚙️ Retrieval Analytics</div>', unsafe_allow_html=True)
             st.markdown(f"""
@@ -767,27 +805,6 @@ if result:
                 <div class="analytics-value" style="font-size:1.1rem;">{analytics['response_time_ms']:.0f}ms</div>
                 <div class="analytics-label">Response Time</div>
               </div>
-            </div>
-            """, unsafe_allow_html=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        # Pipeline visualization
-        if st.session_state.active_document:
-            st.markdown('<div class="search-card">', unsafe_allow_html=True)
-            st.markdown('<div class="section-header">🔄 Retrieval Pipeline</div>', unsafe_allow_html=True)
-            st.markdown("""
-            <div style="font-size:0.8rem;color:#8892a4;line-height:2;">
-              <span style="color:#93c5fd;">Query</span><br>
-              &nbsp;&nbsp;↓<br>
-              <span style="color:#4ade80;">BM25 Sparse Retrieval</span><br>
-              &nbsp;&nbsp;↓<br>
-              <span style="color:#a78bfa;">Dense FAISS Retrieval</span><br>
-              &nbsp;&nbsp;↓<br>
-              <span style="color:#fcd34d;">Merge + Deduplicate</span><br>
-              &nbsp;&nbsp;↓<br>
-              <span style="color:#fca5a5;">CrossEncoder Reranking</span><br>
-              &nbsp;&nbsp;↓<br>
-              <span style="color:#93c5fd;">Final Results</span>
             </div>
             """, unsafe_allow_html=True)
             st.markdown('</div>', unsafe_allow_html=True)

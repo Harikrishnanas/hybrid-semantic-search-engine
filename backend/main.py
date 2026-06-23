@@ -117,12 +117,11 @@ def _classify_query(query: str, has_index: bool) -> str:
 
 def _build_source_label(source_type: str) -> str:
     mapping = {
-        "doc": "📄 Answered using uploaded document",
-        "ai": "🧠 Answered using AI knowledge",
-        "hybrid": "📄 + 🧠 Hybrid answer using document and AI knowledge",
-        "fallback": "🧠 No supporting evidence found. Answered using AI knowledge.",
+        "doc":    "📄 Uploaded Document",
+        "hybrid": "📄 + 🧠 Hybrid",
+        "ai":     "🧠 AI Knowledge",
     }
-    return mapping.get(source_type, "🧠 Answered using AI knowledge")
+    return mapping.get(source_type, "🧠 AI Knowledge")
 
 
 def _merge_candidates(
@@ -163,47 +162,40 @@ def _merge_candidates(
     return list(merged.values())
 
 
-def _calculate_metrics(top_chunks: List[Dict[str, Any]]) -> Tuple[float, float, str, str]:
+def _calculate_metrics(best_rerank: float) -> Tuple[float, float, str, str]:
     """
-    Returns (document_coverage, semantic_confidence, confidence_label, evidence_strength).
+    Maps best_rerank score → (document_coverage, semantic_confidence, confidence_label, evidence_strength).
+    All four values derive from the SAME rerank score so they are always consistent.
     """
-    if not top_chunks:
-        return 0.0, 0.0, "Very Low", "Very Weak"
-        
-    best_rerank = top_chunks[0].get("rerank_score", 0.0)
-    
-    if best_rerank <= 0.01:
-        p = max(0, best_rerank) / 0.01
-        semantic_confidence = p * 10
-        confidence_label = "Very Low"
-        evidence_strength = "Very Weak"
-        document_coverage = 0.0
-    elif best_rerank <= 0.05:
-        p = (best_rerank - 0.01) / 0.04
-        semantic_confidence = 10 + (p * 15)
-        confidence_label = "Low"
-        evidence_strength = "Weak"
-        document_coverage = 25.0
-    elif best_rerank <= 0.15:
-        p = (best_rerank - 0.05) / 0.10
-        semantic_confidence = 25 + (p * 25)
-        confidence_label = "Moderate"
-        evidence_strength = "Moderate"
-        document_coverage = 50.0
-    elif best_rerank <= 0.40:
-        p = (best_rerank - 0.15) / 0.25
-        semantic_confidence = 50 + (p * 25)
-        confidence_label = "High"
-        evidence_strength = "Strong"
-        document_coverage = 75.0
+    if best_rerank < 0.01:
+        return 0.0, 5.0, "Very Low", "No Evidence"
+    elif best_rerank < 0.05:
+        return 0.0, 10.0, "Very Low", "Very Weak"
+    elif best_rerank < 0.15:
+        return 25.0, 30.0, "Low", "Weak"
+    elif best_rerank < 0.35:
+        return 50.0, 55.0, "Moderate", "Moderate"
+    elif best_rerank < 0.60:
+        return 75.0, 75.0, "High", "Strong"
     else:
-        p = min(1.0, (best_rerank - 0.40) / 0.60)
-        semantic_confidence = 75 + (p * 25)
-        confidence_label = "Very High"
-        evidence_strength = "Very Strong"
-        document_coverage = 100.0
-        
-    return document_coverage, round(semantic_confidence, 1), confidence_label, evidence_strength
+        return 100.0, 95.0, "Very High", "Very Strong"
+
+
+def _enforce_consistency(
+    document_coverage: float,
+    semantic_confidence: float,
+    confidence_label: str,
+    evidence_strength: str,
+    source_type: str,
+    evidence_found: bool,
+) -> Tuple[float, float, str, str, str, bool]:
+    """
+    Guard: if coverage == 0 force all dependent metrics to their lowest values.
+    This prevents impossible combinations like Coverage=0% + Confidence=Very High.
+    """
+    if document_coverage == 0.0 or not evidence_found:
+        return 0.0, min(semantic_confidence, 10.0), "Very Low", "No Evidence", "ai", False
+    return document_coverage, semantic_confidence, confidence_label, evidence_strength, source_type, evidence_found
 
 
 _GENERIC_TOPICS = {
@@ -427,9 +419,11 @@ async def query_index(request: QueryRequest):
                 document_coverage=0.0,
                 semantic_confidence=0.0,
                 confidence_label="Very Low",
-                evidence_strength="Very Weak",
+                evidence_strength="No Evidence",
                 evidence_found=False,
-                related_questions=[],
+                best_bm25_score=0.0,
+                best_faiss_score=0.0,
+                best_rerank_score=0.0,
                 analytics=RetrievalAnalytics(
                     total_chunks=0,
                     bm25_matches=0,
@@ -488,6 +482,11 @@ async def query_index(request: QueryRequest):
         top_k = min(request.top_k, 5)
         final_results = merged[:top_k]
 
+        # ── Retrieval transparency scores ─────────────────────────────────
+        best_rerank_score = float(final_results[0]["rerank_score"]) if final_results else 0.0
+        best_faiss_score  = max((r["score"]      for r in final_results), default=0.0)
+        best_bm25_score   = max((r["bm25_score"] for r in final_results), default=0.0)
+
         # ── Analytics ────────────────────────────────────────────────────
         elapsed_ms = round((time.time() - t_start) * 1000, 1)
         analytics = RetrievalAnalytics(
@@ -499,31 +498,37 @@ async def query_index(request: QueryRequest):
             response_time_ms=elapsed_ms,
         )
 
-        # ── Coverage + Confidence ─────────────────────────────────────────
-        document_coverage, semantic_confidence, confidence_label, evidence_strength = _calculate_metrics(final_results)
+        # ── Coverage + Confidence (single source of truth: best_rerank) ──
+        document_coverage, semantic_confidence, confidence_label, evidence_strength = \
+            _calculate_metrics(best_rerank_score)
 
         # ── Generate Answer ───────────────────────────────────────────────
-        if not final_results or document_coverage == 0.0:
-            answer = LLMService.generate_general_answer(request.query)
-            source_type = "ai"
-            evidence_found = False
-            document_coverage = 0.0
-        else:
+        # Only attempt document-grounded answer if there is real evidence
+        if document_coverage >= 25.0 and final_results:
             answer = LLMService.generate_answer(request.query, final_results)
             if answer == "NOT_FOUND" or not answer.strip():
+                # LLM couldn't find it either — treat as AI
                 answer = LLMService.generate_general_answer(request.query)
-                source_type = "ai"
+                source_type   = "ai"
                 evidence_found = False
                 document_coverage = 0.0
+                semantic_confidence = min(semantic_confidence, 10.0)
+                confidence_label = "Very Low"
+                evidence_strength = "No Evidence"
             else:
                 evidence_found = True
                 source_type = "doc" if document_coverage >= 75.0 else "hybrid"
+        else:
+            answer = LLMService.generate_general_answer(request.query)
+            source_type   = "ai"
+            evidence_found = False
 
-        # ── Related Questions (async-safe: just call LLM) ─────────────────
-        context_snippet = " ".join(r["text"][:300] for r in final_results[:2]) if evidence_found else ""
-        related_questions = LLMService.generate_related_questions(
-            request.query, context_snippet
-        )
+        # ── Consistency enforcement (final safety gate) ───────────────────
+        document_coverage, semantic_confidence, confidence_label, evidence_strength, source_type, evidence_found = \
+            _enforce_consistency(
+                document_coverage, semantic_confidence, confidence_label,
+                evidence_strength, source_type, evidence_found
+            )
 
         # ── Build result items ────────────────────────────────────────────
         result_items = [
@@ -548,7 +553,9 @@ async def query_index(request: QueryRequest):
             confidence_label=confidence_label,
             evidence_strength=evidence_strength,
             evidence_found=evidence_found,
-            related_questions=related_questions,
+            best_bm25_score=round(best_bm25_score, 4),
+            best_faiss_score=round(best_faiss_score, 4),
+            best_rerank_score=round(best_rerank_score, 4),
             analytics=analytics,
             best_match=result_items[0] if result_items else None,
             results=result_items,

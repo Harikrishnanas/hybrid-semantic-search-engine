@@ -76,14 +76,14 @@ class QueryResponse(BaseModel):
     answer: str
     source_type: str = Field(
         ...,
-        description="'doc' | 'ai' | 'hybrid' | 'fallback'"
+        description="'doc' | 'ai' | 'hybrid'"
     )
     query_type: str = Field(
         default="general",
         description="'document' | 'general' | 'mixed'"
     )
     source_label: str = Field(
-        default="🧠 Answered using AI knowledge",
+        default="🧠 AI Knowledge",
         description="Human-readable source attribution label"
     )
     document_coverage: float = Field(
@@ -95,20 +95,29 @@ class QueryResponse(BaseModel):
         description="0-100 semantic confidence score from reranker"
     )
     confidence_label: str = Field(
-        default="Low",
+        default="Very Low",
         description="Label for semantic confidence"
     )
     evidence_strength: str = Field(
-        default="Very Weak",
-        description="Very Weak | Weak | Moderate | Strong | Very Strong"
+        default="No Evidence",
+        description="No Evidence | Very Weak | Weak | Moderate | Strong | Very Strong"
     )
     evidence_found: bool = Field(
         default=False,
         description="Whether any supporting evidence was found in the document"
     )
-    related_questions: List[str] = Field(
-        default_factory=list,
-        description="3-5 related questions generated from document context"
+    # Retrieval transparency scores
+    best_bm25_score: float = Field(
+        default=0.0,
+        description="Best BM25 score from retrieval"
+    )
+    best_faiss_score: float = Field(
+        default=0.0,
+        description="Best dense similarity score from FAISS"
+    )
+    best_rerank_score: float = Field(
+        default=0.0,
+        description="Best CrossEncoder reranker score"
     )
     analytics: Optional[RetrievalAnalytics] = None
     best_match: Optional[QueryResultItem] = None

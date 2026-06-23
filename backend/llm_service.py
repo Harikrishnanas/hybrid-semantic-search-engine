@@ -1,71 +1,33 @@
 """
-LLM Service — Gemini-backed (with Ollama fallback)
-===================================================
-Uses the Gemini API (key from .env GEMINI_API_KEY).
-Falls back to Ollama qwen2.5:3b if Gemini is unavailable.
+LLM Service — Ollama-backed
+===========================
+Uses a local Ollama instance (qwen2.5:3b) for all LLM calls.
 """
 
-import os
 import logging
 import requests
 from typing import List, Dict, Any, Tuple
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_ENDPOINT = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "gemini-2.0-flash:generateContent"
-)
 OLLAMA_ENDPOINT = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "qwen2.5:3b"
 
 
-def _call_gemini(prompt: str) -> str:
-    """Call Gemini REST API directly."""
-    if not GEMINI_API_KEY:
-        raise RuntimeError("No GEMINI_API_KEY set")
-
-    url = f"{GEMINI_ENDPOINT}?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"maxOutputTokens": 1024, "temperature": 0.2},
-    }
-    resp = requests.post(url, json=payload, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
-    return (
-        data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    )
-
-
-def _call_ollama(prompt: str) -> str:
-    """Call local Ollama as fallback."""
-    resp = requests.post(
-        OLLAMA_ENDPOINT,
-        json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json()["response"].strip()
-
-
 def _call_llm(prompt: str) -> str:
-    """Try Gemini first, fall back to Ollama."""
+    """Call local Ollama instance."""
     try:
-        return _call_gemini(prompt)
+        resp = requests.post(
+            OLLAMA_ENDPOINT,
+            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["response"].strip()
     except Exception as e:
-        logger.warning(f"Gemini failed ({e}), trying Ollama …")
-        try:
-            return _call_ollama(prompt)
-        except Exception as e2:
-            logger.error(f"Ollama also failed: {e2}")
-            return "I was unable to generate an answer at this time."
+        logger.error(f"Ollama call failed: {e}")
+        return "I was unable to generate an answer at this time."
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
