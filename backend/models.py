@@ -65,6 +65,7 @@ class DocumentIntelligenceResponse(BaseModel):
     filename: str
     num_pages: int
     num_chunks: int
+    summary: str = Field(default="", description="LLM-generated document summary")
     top_topics: List[str]
     coverage_heatmap: List[CoverageItem]
 

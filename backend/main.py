@@ -9,7 +9,9 @@ import re
 import time
 import shutil
 import logging
-from collections import Counter
+import math
+import json
+from collections import Counter, defaultdict
 from typing import List, Dict, Any, Optional, Tuple
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
@@ -65,24 +67,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 #  Utility helpers
 # ─────────────────────────────────────────────────────────────────────────── #
 
-_STOPWORDS = {
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "to", "of", "in", "on",
-    "at", "by", "for", "with", "about", "as", "from", "that", "this",
-    "it", "its", "or", "and", "but", "not", "no", "so", "if", "then",
-    "what", "which", "who", "when", "where", "how", "why", "there",
-    "their", "they", "we", "our", "you", "your", "he", "she", "his",
-    "her", "my", "i", "me", "us", "also", "more", "some", "any", "such",
-    "these", "those", "each", "both", "all", "other", "than", "into",
-    "through", "during", "before", "after", "above", "below",
-}
 
-_DOCUMENT_KEYWORDS = {
-    "document", "text", "file", "pdf", "paper", "article", "chapter",
-    "section", "content", "uploaded", "given", "provided", "mentioned",
-    "stated", "according", "based", "context", "passage", "excerpt",
-}
 
 
 
@@ -198,107 +183,72 @@ def _enforce_consistency(
     return document_coverage, semantic_confidence, confidence_label, evidence_strength, source_type, evidence_found
 
 
-_GENERIC_TOPICS = {
-    "example", "examples", "system", "systems", "data", "input", "output", 
-    "information", "technology", "model", "models", "learning", "intelligence", 
-    "analysis", "method", "methods", "approach", "results", "conclusion", 
-    "introduction", "chapter", "section", "figure", "table", "process", 
-    "overview", "summary", "background", "related work", "machine", "machines",
-    "network", "networks", "algorithm", "algorithms"
-}
-
-_TOPIC_NORMS = {
-    "Ai": "Artificial Intelligence",
-    "Llm": "Large Language Models",
-    "Llms": "Large Language Models",
-    "Nlp": "Natural Language Processing",
-    "Rag": "Retrieval-Augmented Generation",
-    "Ml": "Machine Learning",
-    "Dl": "Deep Learning",
-    "Cv": "Computer Vision",
-    "Generative Ai": "Generative AI",
-    "Artificial Intelligence": "Artificial Intelligence",
-    "Machine Learning": "Machine Learning",
-    "Deep Learning": "Deep Learning"
-}
-
-def _get_topic_coverage(
-    chunks: List[Dict[str, Any]], top_topics: List[str]
-) -> List[CoverageItem]:
-    """Calculate per-topic frequency as a percentage of total chunks."""
-    if not top_topics or not chunks:
-        return []
-
-    topic_counts: Dict[str, int] = {t: 0 for t in top_topics}
-    total = len(chunks)
-
-    for chunk in chunks:
-        text_lower = chunk["text"].lower()
-        for topic in top_topics:
-            topic_lower = topic.lower()
-            if len(topic_lower) <= 3:
-                # Use regex for short acronyms to avoid substring matching
-                if re.search(r'\b' + re.escape(topic_lower) + r'\b', text_lower):
-                    topic_counts[topic] += 1
-            else:
-                if topic_lower in text_lower:
-                    topic_counts[topic] += 1
-
-    items = [
-        CoverageItem(topic=t, percentage=round(count / total * 100, 1))
-        for t, count in topic_counts.items()
-    ]
-    items.sort(key=lambda x: x.percentage, reverse=True)
-    return items
-
-
-def _extract_top_topics(chunks: List[Dict[str, Any]], n: int = 10) -> List[str]:
-    """Extract top N topics using headings and noun phrases, avoiding generic single words."""
-    topics = []
+def _compute_document_intelligence(index_id: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    cache_path = os.path.join(UPLOAD_DIR, f"{index_id}_intelligence.json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load cached intelligence: {e}")
+            
+    # 1. LLM Concept Extraction
+    intel = LLMService.extract_document_intelligence(chunks)
+    summary = intel.get("summary", "")
+    topics = intel.get("topics", [])
     
-    for chunk in chunks:
-        text = chunk["text"]
+    if not topics:
+        result = {"summary": summary, "top_topics": [], "coverage_heatmap": []}
+        return result
         
-        # 1. Extract Headings
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("#"):
-                heading = line.lstrip("# \t").strip()
-                if 3 < len(heading) < 60:
-                    topics.append(heading.title())
-            elif 3 < len(line) < 60 and not line.endswith(('.', ',', '?', ':', ';')):
-                words = line.split()
-                if 1 <= len(words) <= 6:
-                    if line.isupper() or all(w[0].isupper() for w in words if w.isalpha()):
-                        topics.append(line.title())
-        
-        # 2. Extract multi-word title-case phrases (2 to 5 words)
-        phrases = re.findall(r'\b(?:[A-Z][A-Za-z-]*\s+){1,4}[A-Z][A-Za-z-]*\b', text)
-        for p in phrases:
-            if len(p) < 60:
-                topics.append(p.title())
-                
-        # 3. Extract common acronyms
-        acronyms = re.findall(r'\b(?:AI|LLM|LLMs|NLP|RAG|ML|DL|CV)\b', text)
-        for a in acronyms:
-            topics.append(a.title())
-
-    freq = Counter()
-    for t in topics:
-        t = " ".join(t.split())
-        t_lower = t.lower()
-        
-        if t_lower in _GENERIC_TOPICS or t_lower in _STOPWORDS or t_lower in _DOCUMENT_KEYWORDS:
-            continue
+    # 2. Semantic Density Coverage Algorithm
+    topic_matches = {}
+    total_matching_chunks = 0
+    
+    for topic in topics:
+        try:
+            topic_emb = EmbeddingService.generate_embedding(topic)
+            # Fetch all chunks
+            results = FAISSService.semantic_search(index_id, topic_emb, top_k=len(chunks))
+            # Semantic Threshold: count chunks with cosine similarity > 0.35
+            matches = sum(1 for r in results if r["score"] >= 0.35)
+            topic_matches[topic] = matches
+            total_matching_chunks += matches
+        except Exception as e:
+            logger.error(f"Coverage error for '{topic}': {e}")
+            topic_matches[topic] = 0
             
-        # Ignore generic single words
-        if len(t.split()) == 1 and t.title() not in _TOPIC_NORMS and t.upper() not in _TOPIC_NORMS:
-            continue
+    # 3. Calculate Relative Percentages
+    heatmap_dicts = []
+    if total_matching_chunks > 0:
+        for topic, matches in topic_matches.items():
+            if matches > 0:
+                pct = round((matches / total_matching_chunks) * 100, 1)
+                heatmap_dicts.append({"topic": topic, "percentage": pct})
+    
+    # Sort descending
+    heatmap_dicts.sort(key=lambda x: x["percentage"], reverse=True)
+    
+    # Match topics list order to heatmap
+    ordered_topics = [item["topic"] for item in heatmap_dicts]
+    for topic in topics:
+        if topic not in ordered_topics:
+            ordered_topics.append(topic)
             
-        t_norm = _TOPIC_NORMS.get(t.title(), _TOPIC_NORMS.get(t.upper(), t.title()))
-        freq[t_norm] += 1
+    result = {
+        "summary": summary,
+        "top_topics": ordered_topics,
+        "coverage_heatmap": heatmap_dicts
+    }
+    
+    # 4. Cache to disk
+    try:
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to cache intelligence: {e}")
         
-    return [w for w, _ in freq.most_common(n)]
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -587,16 +537,16 @@ async def document_intelligence(index_id: str, filename: str = ""):
 
     try:
         _, chunks = FAISSService.load_index_and_metadata(index_id)
-        top_topics = _extract_top_topics(chunks, n=10)
-        heatmap = _get_topic_coverage(chunks, top_topics)
+        intel = _compute_document_intelligence(index_id, chunks)
 
         return DocumentIntelligenceResponse(
             index_id=index_id,
             filename=filename or index_id,
             num_pages=0,   # unknown without re-reading PDF; caller provides via session
             num_chunks=len(chunks),
-            top_topics=top_topics,
-            coverage_heatmap=heatmap,
+            summary=intel.get("summary", ""),
+            top_topics=intel.get("top_topics", []),
+            coverage_heatmap=[CoverageItem(**item) for item in intel.get("coverage_heatmap", [])],
         )
     except Exception as e:
         logger.error(f"Document intelligence error: {e}")

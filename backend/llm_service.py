@@ -6,6 +6,7 @@ Uses a local Ollama instance (qwen2.5:3b) for all LLM calls.
 
 import logging
 import requests
+import json
 from typing import List, Dict, Any, Tuple
 
 logging.basicConfig(level=logging.INFO)
@@ -15,19 +16,23 @@ OLLAMA_ENDPOINT = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "qwen2.5:3b"
 
 
-def _call_llm(prompt: str) -> str:
+def _call_llm(prompt: str, json_format: bool = False) -> str:
     """Call local Ollama instance."""
     try:
+        payload = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
+        if json_format:
+            payload["format"] = "json"
+            
         resp = requests.post(
             OLLAMA_ENDPOINT,
-            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
-            timeout=60,
+            json=payload,
+            timeout=120,
         )
         resp.raise_for_status()
         return resp.json()["response"].strip()
     except Exception as e:
         logger.error(f"Ollama call failed: {e}")
-        return "I was unable to generate an answer at this time."
+        return "{}" if json_format else "I was unable to generate an answer at this time."
 
 
 # ─────────────────────────────────────────────────────────────────────────── #
@@ -57,6 +62,67 @@ Document Context:
 
 Answer:"""
         return _call_llm(prompt)
+
+    @staticmethod
+    def extract_document_intelligence(chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Extracts document intelligence (summary and topics) using Ollama JSON format.
+        """
+        # Take a representative sample to avoid context overflow
+        # First 5 chunks, and any chunks that look like headings
+        sample_chunks = []
+        for i, chunk in enumerate(chunks):
+            if i < 5:
+                sample_chunks.append(chunk["text"])
+            elif "#" in chunk["text"] or "\n" in chunk["text"][:50]:
+                if len(sample_chunks) < 15:
+                    sample_chunks.append(chunk["text"])
+                    
+        # Limit to 15 chunks max
+        sample_chunks = sample_chunks[:15]
+        context = "\n\n---\n\n".join(sample_chunks)
+        
+        prompt = f"""You are a document analysis expert.
+
+Analyze the provided document content.
+Extract the most important concepts discussed in the document.
+
+Rules:
+Return concepts, not keywords.
+Return noun phrases.
+Avoid generic words.
+Avoid verbs.
+Avoid duplicate concepts.
+Avoid single-word concepts unless absolutely necessary.
+Prefer technical concepts.
+Prefer concepts that summarize major themes.
+Return between 5 and 10 concepts.
+Also provide a one-sentence document summary.
+
+Return JSON only using the exact format:
+{{
+"summary": "...",
+"topics": [
+"...",
+"...",
+"..."
+]
+}}
+
+Document Content:
+{context}
+"""
+        raw_json = _call_llm(prompt, json_format=True)
+        try:
+            parsed = json.loads(raw_json)
+            if "summary" not in parsed:
+                parsed["summary"] = ""
+            if "topics" not in parsed:
+                parsed["topics"] = []
+            return parsed
+        except Exception as e:
+            logger.error(f"Failed to parse LLM JSON: {e}")
+            return {"summary": "", "topics": []}
 
     @staticmethod
     def generate_general_answer(query: str) -> str:

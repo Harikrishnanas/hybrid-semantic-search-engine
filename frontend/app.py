@@ -555,6 +555,10 @@ with st.sidebar:
         if di:
             st.markdown('<div class="section-header">🧠 Document Intelligence</div>', unsafe_allow_html=True)
 
+            if di.get("summary"):
+                st.markdown("**Document Summary**")
+                st.markdown(f"<div style='font-size:0.85rem;color:#ccc;margin-bottom:1rem;'>{di['summary']}</div>", unsafe_allow_html=True)
+
             if di.get("top_topics"):
                 st.markdown("**Top Topics**")
                 for topic in di["top_topics"]:
@@ -863,3 +867,4 @@ elif not result:
       </div>
     </div>
     """, unsafe_allow_html=True)
+    
