@@ -11,3 +11,9 @@ rank-bm25
 python-dotenv
 langchain-experimental
 langchain-huggingface
+python-docx
+openpyxl
+python-pptx
+pandas
+beautifulsoup4
+markdown

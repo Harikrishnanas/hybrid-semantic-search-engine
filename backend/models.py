@@ -6,17 +6,18 @@ from typing import List, Optional, Dict, Any
 # ─────────────────────────────────────────────
 
 class UploadResponse(BaseModel):
-    filename: str = Field(..., description="The name of the uploaded file")
-    file_path: str = Field(..., description="Local path where the file is stored")
+    filenames: List[str] = Field(..., description="The names of the uploaded files")
+    file_paths: List[str] = Field(..., description="Local paths where the files are stored")
     message: str = Field(..., description="Status message")
 
 class CreateIndexRequest(BaseModel):
-    file_path: str = Field(..., description="Local path to the PDF file to index")
+    file_paths: List[str] = Field(..., description="Local paths to the files to index")
 
 class CreateIndexResponse(BaseModel):
     index_id: str = Field(..., description="Unique identifier for the generated FAISS index")
-    num_pages: int = Field(..., description="Total pages processed from the PDF")
-    num_chunks: int = Field(..., description="Total text chunks generated and indexed")
+    total_files: int = Field(..., description="Total files processed")
+    total_pages: int = Field(..., description="Total pages/sections processed")
+    total_chunks: int = Field(..., description="Total text chunks generated and indexed")
     message: str = Field(..., description="Status message")
 
 # ─────────────────────────────────────────────
@@ -35,7 +36,9 @@ class QueryRequest(BaseModel):
 class QueryResultItem(BaseModel):
     text: str = Field(..., description="The raw text content of the chunk")
     score: float = Field(..., description="FAISS cosine similarity score")
-    page_number: int = Field(..., description="The source PDF page number (1-indexed)")
+    source_file: str = Field(..., description="The original filename")
+    document_type: str = Field(..., description="The type of the document")
+    page_number: Optional[int] = Field(None, description="The source PDF page number (1-indexed)")
     chunk_index: int = Field(..., description="The index order of the chunk in the document")
     bm25_score: float = Field(default=0.0, description="BM25 retrieval score")
     rerank_score: float = Field(default=0.0, description="CrossEncoder reranker score")
@@ -60,14 +63,19 @@ class CoverageItem(BaseModel):
     topic: str
     percentage: float
 
-class DocumentIntelligenceResponse(BaseModel):
-    index_id: str
+class DocumentIntelligenceItem(BaseModel):
     filename: str
-    num_pages: int
-    num_chunks: int
-    summary: str = Field(default="", description="LLM-generated document summary")
+    summary: str
     top_topics: List[str]
     coverage_heatmap: List[CoverageItem]
+
+class DocumentIntelligenceResponse(BaseModel):
+    index_id: str
+    total_files: int
+    total_pages: int
+    total_chunks: int
+    document_types: List[str] = Field(default_factory=list)
+    documents: List[DocumentIntelligenceItem] = Field(default_factory=list)
 
 # ─────────────────────────────────────────────
 #  Query Response — full enriched response
@@ -106,6 +114,14 @@ class QueryResponse(BaseModel):
     evidence_found: bool = Field(
         default=False,
         description="Whether any supporting evidence was found in the document"
+    )
+    sources_used: List[str] = Field(
+        default_factory=list,
+        description="List of filenames used to support the answer"
+    )
+    evidence_distribution: Dict[str, float] = Field(
+        default_factory=dict,
+        description="Percentage of evidence contributed by each source file"
     )
     # Retrieval transparency scores
     best_bm25_score: float = Field(

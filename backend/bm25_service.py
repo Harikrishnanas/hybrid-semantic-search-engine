@@ -131,10 +131,12 @@ class BM25Service:
             chunk = chunks[idx]
             results.append({
                 "text": chunk["text"],
-                "page_number": int(chunk["page_number"]),
+                "source_file": chunk.get("source_file", ""),
+                "document_type": chunk.get("document_type", ""),
+                "page_number": chunk.get("page_number"),
                 "chunk_index": int(chunk["chunk_index"]),
                 "bm25_score": float(score),
-                "score": 0.0,          # FAISS cosine score filled later during merge
+                "score": 0.0,
                 "rerank_score": 0.0,
             })
 

@@ -159,7 +159,9 @@ class FAISSService:
             results.append({
                 "text": metadata["text"],
                 "score": float(score),
-                "page_number": int(metadata["page_number"]),
+                "source_file": metadata.get("source_file", ""),
+                "document_type": metadata.get("document_type", ""),
+                "page_number": metadata.get("page_number"),
                 "chunk_index": int(metadata["chunk_index"])
             })
 
